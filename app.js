@@ -1,99 +1,186 @@
 import express from 'express';
-import bodyParser from 'body-parser';
-import nerdamer from 'nerdamer/all.min.js';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
+import cors from 'cors';
 
-const app = express();
-const PORT = 3001;
+const getServer = () => {
+  // Create an MCP server with implementation details
+  const server = new McpServer({
+    name: 'stateless-streamable-http-server',
+    version: '1.0.0',
+  }, { capabilities: { logging: {} } });
 
-app.use(bodyParser.json());
+  // Register a simple prompt
+  server.prompt(
+    'greeting-template',
+    'A simple greeting prompt template',
+    {
+      name: z.string().describe('Name to include in greeting'),
+    },
+    async ({ name }) => {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Please greet ${name} in a friendly manner.`,
+            },
+          },
+        ],
+      };
+    }
+  );
 
-// 🧠 Converts natural text to math expression
-function parseNaturalToExpression(query) {
-  query = query.toLowerCase().trim();
+  // Register a tool specifically for testing resumability
+  server.tool(
+    'start-notification-stream',
+    'Starts sending periodic notifications for testing resumability',
+    {
+      interval: z.number().describe('Interval in milliseconds between notifications').default(100),
+      count: z.number().describe('Number of notifications to send (0 for 100)').default(10),
+    },
+    async ({ interval, count }, { sendNotification }) => {
+      const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+      let counter = 0;
 
-  if (query.includes('factorial')) {
-    const num = query.match(/\d+/)?.[0];
-    return `factorial(${num})`;
-  }
+      while (count === 0 || counter < count) {
+        counter++;
+        try {
+          await sendNotification({
+            method: "notifications/message",
+            params: {
+              level: "info",
+              data: `Periodic notification #${counter} at ${new Date().toISOString()}`
+            }
+          });
+        }
+        catch (error) {
+          console.error("Error sending notification:", error);
+        }
+        // Wait for the specified interval
+        await sleep(interval);
+      }
 
-  if (query.includes('log')) {
-    const num = query.match(/\d+(\.\d+)?/)?.[0];
-    return `log(${num})`;
-  }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Started sending periodic notifications every ${interval}ms`,
+          }
+        ],
+      };
+    }
+  );
 
-  if (query.includes('derivative')) {
-    const expr = query.match(/of (.+)/)?.[1];
-    return `diff(${expr}, x)`;
-  }
-
-  if (query.includes('integral')) {
-    const expr = query.match(/of (.+)/)?.[1];
-    return `integrate(${expr}, x)`;
-  }
-
-  if (query.includes('solve')) {
-    const expr = query.match(/solve (.+)/)?.[1];
-    return expr;
-  }
-
-  return query;
+  // Create a simple resource at a fixed URI
+  server.resource(
+    'greeting-resource',
+    'https://example.com/greetings/default',
+    { mimeType: 'text/plain' },
+    async () => {
+      return {
+        contents: [
+          {
+            uri: 'https://example.com/greetings/default',
+            text: 'Hello, world!',
+          },
+        ],
+      };
+    }
+  );
+  return server;
 }
 
-// ✅ JSON endpoint for OpenRouter tool calling
-app.post('/mcp', (req, res) => {
-  const { query } = req.body;
-  if (!query) return res.status(400).json({ error: 'Missing query' });
+const app = express();
+app.use(express.json());
 
+// Configure CORS to expose Mcp-Session-Id header for browser-based clients
+app.use(cors({
+  origin: '*', // Allow all origins - adjust as needed for production
+  exposedHeaders: ['Mcp-Session-Id']
+}));
+
+app.post('/mcp', async (req, res) => {
+  const server = getServer();
   try {
-    const parsed = parseNaturalToExpression(query);
-    const result = nerdamer(parsed).toString();
-
-    res.json({
-      input: query,
-      parsedExpression: parsed,
-      result
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
     });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+    res.on('close', () => {
+      console.log('Request closed');
+      transport.close();
+      server.close();
+    });
+  } catch (error) {
+    console.error('Error handling MCP request:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32603,
+          message: 'Internal server error',
+        },
+        id: null,
+      });
+    }
   }
 });
 
-// ✅ SSE endpoint for streaming (optional)
-app.get('/mcp-stream', (req, res) => {
-  const query = req.query.query;
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-
-  if (!query) {
-    res.write(`event: error\ndata: Missing query\n\n`);
-    return res.end();
-  }
-
-  res.write(`event: message\ndata: 🔍 Received: ${query}\n\n`);
-
-  const parsed = parseNaturalToExpression(query);
-  setTimeout(() => {
-    res.write(`event: message\ndata: 🧠 Parsed as: ${parsed}\n\n`);
-
-    setTimeout(() => {
-      try {
-        const result = nerdamer(parsed).toString();
-        res.write(`event: message\ndata: ✅ Result: ${result}\n\n`);
-        res.write(`event: done\ndata: done\n\n`);
-      } catch (e) {
-        res.write(`event: error\ndata: ${e.message}\n\n`);
-      }
-      res.end();
-    }, 1000);
-  }, 1000);
+app.get('/mcp', async (req, res) => {
+  console.log('Received GET MCP request');
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: {
+      code: -32000,
+      message: "Method not allowed."
+    },
+    id: null
+  }));
 });
 
-// ✅ Start server
-app.listen(PORT, () => {
-  console.log(`🚀 MCP Server running at http://localhost:${PORT}`);
-  console.log(`📩 POST /mcp`);
-  console.log(`📡 GET  /mcp-stream?query=your-question`);
+app.delete('/mcp', async (req, res) => {
+  console.log('Received DELETE MCP request');
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: {
+      code: -32000,
+      message: "Method not allowed."
+    },
+    id: null
+  }));
+});
+
+// Start the HTTPS server
+const PORT = 3001;
+
+// Load SSL certificates
+const sslOptions = {
+  key: fs.readFileSync(path.join(process.cwd(), 'certs', 'server.key')),
+  cert: fs.readFileSync(path.join(process.cwd(), 'certs', 'server.cert'))
+};
+
+const httpsServer = https.createServer(sslOptions, app);
+
+httpsServer.listen(PORT, (error) => {
+  if (error) {
+    console.error('Failed to start HTTPS server:', error);
+    process.exit(1);
+  }
+  console.log(`MCP Stateless Streamable HTTPS Server listening on port ${PORT}`);
+});
+
+// Handle server shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down HTTPS server...');
+  httpsServer.close(() => {
+    console.log('HTTPS server closed');
+    process.exit(0);
+  });
 });
