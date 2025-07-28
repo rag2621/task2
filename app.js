@@ -158,7 +158,7 @@ app.delete('/mcp', async (req, res) => {
 });
 
 // Start the HTTPS server
-const PORT = 3001;
+const PORT = 3043;
 
 // Load SSL certificates
 const sslOptions = {
