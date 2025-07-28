@@ -1,7 +1,6 @@
 import express from 'express';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
+import http from 'http'; // Changed from https to http
+// Removed fs and path imports as they're not needed for HTTP
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
@@ -157,30 +156,26 @@ app.delete('/mcp', async (req, res) => {
   }));
 });
 
-// Start the HTTPS server
-const PORT = 3043;
+// Start the HTTP server
+const PORT = 3001;
 
-// Load SSL certificates
-const sslOptions = {
-  key: fs.readFileSync(path.join(process.cwd(), 'certs', 'server.key')),
-  cert: fs.readFileSync(path.join(process.cwd(), 'certs', 'server.cert'))
-};
+// Create HTTP server (removed SSL options)
+const httpServer = http.createServer(app);
 
-const httpsServer = https.createServer(sslOptions, app);
-
-httpsServer.listen(PORT, (error) => {
+httpServer.listen(PORT, (error) => {
   if (error) {
-    console.error('Failed to start HTTPS server:', error);
+    console.error('Failed to start HTTP server:', error);
     process.exit(1);
   }
-  console.log(`MCP Stateless Streamable HTTPS Server listening on port ${PORT}`);
+  console.log(`MCP Stateless Streamable HTTP Server listening on port ${PORT}`);
+  console.log(`Server URL: http://localhost:${PORT}`);
 });
 
 // Handle server shutdown
 process.on('SIGINT', async () => {
-  console.log('Shutting down HTTPS server...');
-  httpsServer.close(() => {
-    console.log('HTTPS server closed');
+  console.log('Shutting down HTTP server...');
+  httpServer.close(() => {
+    console.log('HTTP server closed');
     process.exit(0);
   });
 });
